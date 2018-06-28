@@ -1,35 +1,80 @@
+# Collects the 2018 player data.
 library("rvest")
+source("impute.R")
+source("fix_conference.R")
 
-for (year in 2008:2017) { 
+# Flag to check whether the pick and round data should be scraped.
+current = FALSE
+
+years = list()
+
+START_YEAR = 2008
+END_YEAR = 2018
+
+# Given html table data and a stat, returns the value of the stat.
+get_stat <- function(html_data, stat) {
+  nodes <- html_nodes(html_data, paste("#", stat, sep="")) 
+  if (length(nodes) > 0) {
+    html_table(nodes, header=TRUE)[[1]]
+  } else {
+    nodes <- html_nodes(html_data, paste("#all_", stat, sep=""))  
+    nodes <- html_nodes(nodes, xpath = 'comment()')
+    if (length(nodes) > 0) {
+      nodes %>% html_text() %>%   
+        read_html() %>%             
+        html_node('table') %>%    
+        html_table(header=TRUE)  
+    } else {
+      NULL
+    }
+  }
+}
+
+# Cleans the data from get_stat.
+header <- function(final_table) {
+  if (!is.null(final_table)) {
+    colnames(final_table) = final_table[1, ]
+    final_table[-1, ]
+  } else {
+    NULL
+  }
+}
+
+# Loop over all years in the dataset.
+for (year in START_YEAR:END_YEAR) {
   print(year)
   # Read draft data
-  url <- paste("https://www.pro-football-reference.com/years/", year, "/draft.htm", sep="")
+  url <- paste(c("https://www.pro-football-reference.com/draft/", as.character(year), "-combine.htm"), collapse="")
   webpage <- read_html(url)
   
-  names_html <- html_nodes(webpage, "#drafts td:nth-child(4)")
-  names <- html_text(names_html)
-  filter_names <- function(names) {
-    grepl("HOF", names)
-  }
-  filter_names <- Vectorize(filter_names)
-  names[filter_names(names)] = substr(names[filter_names(names)], 1, nchar(names[filter_names(names)]) - 4)
+  # Get the names of the players
+  names_html <- html_nodes(webpage, "tbody .left:nth-child(1)")
+  all_names <- html_text(names_html)
+  names <- all_names[all_names != "Player"]
+  num_players = length(names)
   
-  rnd_html <- html_nodes(webpage, "#drafts th.right")
-  rnd <- as.numeric(html_text(rnd_html))
-  
-  pick_html <- html_nodes(webpage, "#drafts th+ .right")
-  pick <- as.numeric(html_text(pick_html))
-  
-  pos_html <- html_nodes(webpage, "#drafts .left~ .left+ td.left")
+  # Get the position of the players
+  pos_html <- html_nodes(webpage, "th+ td")
   pos <- html_text(pos_html)
   
-  age_html <- html_nodes(webpage, "#drafts .right:nth-child(6)")
-  age <- as.numeric(html_text(age_html))
+  pick <- rep(0, num_players)
+  round <- rep(0, num_players)
+  # Get draft data if this is not the current year.
+  if (!current) {
+    draft_html <- html_nodes(webpage , ".right+ .left")
+    draft_info <- html_text(draft_html)
+    draft_info[draft_info == ""] = "Undrafted / 0th / 0th / 0"
+    draft_spots <- matrix(unlist(strsplit(draft_info, " / ")), ncol = 4, byrow = T);
+    round <- as.numeric(substr(draft_spots[,2], 0, 1))
+    pick <- as.numeric(gsub("[^0-9.]", "", draft_spots[,3]))
+  }
   
-  college_html <- html_nodes(webpage, "#drafts td~ .right+ .left")
+  # Get college Data
+  college_html <- html_nodes(webpage, "td.left+ .left")
   college <- html_text(college_html)
   
-  cols = c("Row", "Name", "Position", "Age", "Round", "Pick", "College", "Conference", "Games", "Seasons")
+  # Define names of columns
+  cols = c("Row", "Name", "Position", "Round", "Pick", "College", "Conference", "Games", "Seasons")
   combine = c("Height", "Weight", "40 Yard", "Bench", "Broad Jump", "Shuttle", "3 Cone", 
               "Vertical")
   defense = c("Solo Tackles", "Ast Tackles", "Total Tackles", "Tackles for Loss", 
@@ -43,144 +88,91 @@ for (year in 2008:2017) {
               "FGA", "FG%", "Punts", "Punt Avg")
   cols = c(cols, combine, offense, defense, special)
   
-  def_pos = c("CB", "DB", "DE", "DT", "FS", "ILB", "LB", "NT", "OLB", "S", "SS")
+  # List names of positions
+  def_pos = c("CB", "DB", "DE", "DT", "FS", "ILB", "LB", "NT", "OLB", "S", "SS", "EDGE")
   off_pos = c("C", "FB", "G", "QB", "RB", "T", "TE", "WR")
   other_pos = c("K", "P", "LS")
   
-  info_df = data.frame(pick, names, pos, age, rnd, pick, college)
-  other_df = data.frame(matrix(0, nrow = length(names), ncol=49))
-  other_df[1] = 1:length(names)
+  # Set up dataframe that holds the data.
+  info_df = data.frame(1:num_players, names, pos, round, pick, college)
+  other_df = data.frame(matrix(0, nrow = num_players, ncol=49))
+  other_df[1] = 1:num_players
   names(other_df)[1] = "Row"
   names(info_df)[1] = "Row"
   df = merge(info_df, other_df)
   names(df) = cols
-  df = df[-1]
-  df = df[order(df$Pick),]
   rownames(df) <- NULL
+  df["Row"] <- NULL
   
-  get_stat <- function(html_data, stat) {
-    nodes <- html_nodes(html_data, paste("#", stat, sep="")) 
-    if (length(nodes) > 0) {
-      html_table(nodes, header=TRUE)[[1]]
-    } else {
-      nodes <- html_nodes(html_data, paste("#all_", stat, sep=""))  
-      nodes <- html_nodes(nodes, xpath = 'comment()')
-      if (length(nodes) > 0) {
-        nodes %>% html_text() %>%   
-          read_html() %>%             
-          html_node('table') %>%    
-          html_table(header=TRUE)  
-      } else {
-        NULL
-      }
-    }
-  }
+  # Get list of stat pages for all players.
+  stat_urls = html_nodes(webpage, ".left+ .right")
+  stats = html_table(webpage)[[1]]
+  stats = stats[stats$Player != "Player",]
+  rownames(stats) <- NULL
   
-  header <- function(final_table) {
-    if (!is.null(final_table)) {
-      colnames(final_table) = final_table[1, ]
-      final_table[-1, ]
-    } else {
-      NULL
-    }
-  }
-  
-  old_rnd = 0
+  # Initialize the list of rows that do not have any good information.
   bad_rows = list()
   
-  # We now have all of our info data. Let's now collect college stats.
+  # Loops through all players and collects college stats
   for (row in 1:nrow(df)) {
-    curr_rnd = df[row, "Round"]
-    if (curr_rnd != old_rnd) {
-      print(paste("Round", curr_rnd))
-      old_rnd <- curr_rnd
-    }
-    stat_url = html_attr(html_nodes(webpage, paste("#drafts tr:nth-child(", row+curr_rnd-1, ") .right a")), "href")
-    nfl_url = html_attr(html_nodes(webpage, paste("#drafts tr:nth-child(", row+curr_rnd-1, ") .left+ .left a")), "href")
-    nfl_url = paste("https://www.pro-football-reference.com", nfl_url, sep="")
-    
-    pos = df[row, "Position"]
-    
-    if ((length(stat_url) == 0) || (length(nfl_url) == 0)) {
-      if ((pos == "T") || (pos == "LS") || (pos == "G") || (pos == "C")) {
-        if (length(nfl_url) == 0) {
-          bad_rows <- c(bad_rows, row)
-          next
-        }
-        nfl_page <- read_html(nfl_url)
-        combine <- get_stat(nfl_page, "combine")
-        if (length(combine) > 0) {
-          df[row, "Height"] = as.numeric(combine[1, "Ht"])
-          df[row, "Weight"] = as.numeric(combine[1, "Wt"])
-          df[row, "40 Yard"] = as.numeric(combine[1, "40yd"])
-          df[row, "Bench"] = as.numeric(combine[1, "Bench"])
-          df[row, "Broad Jump"] = as.numeric(combine[1, "Broad Jump"])
-          df[row, "Shuttle"] = as.numeric(combine[1, "Shuttle"])
-          df[row, "3 Cone"] = as.numeric(combine[1, "3Cone"])
-          df[row, "Vertical"] = as.numeric(combine[1, "Vertical"])
-        } else {
-          if (length(html_nodes(nfl_page, "#meta p+ p span:nth-child(1)")) > 0) {
-            height <- html_text(html_nodes(nfl_page, "#meta p+ p span:nth-child(1)"))
-            weight <- html_text(html_nodes(nfl_page, "#meta span+ span:nth-child(2)"))
-            if ((length(height) == 0) || (length(weight) == 0)) {
-              bad_rows <- c(bad_rows, row)
-              next
-            }
-            height <- as.numeric(strsplit(height, "-")[[1]])
-            df[row, "Height"] = 12 * height[1] + height[2]
-            df[row, "Weight"] = as.numeric(substr(weight, 1, 3))
-          }
-        }
-      } else {
-        bad_rows <- c(bad_rows, row)
-      }
+    # Skip header rows
+    if (df[row, "Name"] == "Player") {
+      bad_rows <- c(bad_rows, row)
       next
     }
-    if (stat_url == "http://www.sports-reference.com/cfb/players/brian-calhoun-2.html") {
-      stat_url = "http://www.sports-reference.com/cfb/players/brian-calhoun-1.html"
-    }
-    if (stat_url == "http://www.sports-reference.com/cfb/players/walter-thurmond-1.html") {
-      stat_url = "http://www.sports-reference.com/cfb/players/walter-thurmond-iii-1.html"
-    }
-    stat_page <- read_html(stat_url)
-    nfl_page <- read_html(nfl_url)
     
+    stat_url = html_attr(html_nodes(stat_urls[row], "a"), "href")
+    
+    # Read vital data
+    pos <- df[row, "Position"]
+    height <- stats[row, "Ht"]
+    weight <- stats[row, "Wt"]
+    height <- as.numeric(strsplit(height, "-")[[1]])
+    df[row, "Height"] = 12 * height[1] + height[2]
+    df[row, "Weight"] = as.numeric(substr(weight, 1, 3))
+    
+    # Read combine data
+    df[row, "40 Yard"] = as.numeric(stats[row, "40yd"])
+    df[row, "Vertical"] = as.numeric(stats[row, "Vertical"])
+    df[row, "Bench"] = as.numeric(stats[row, "Bench"])
+    df[row, "Broad Jump"] = as.numeric(stats[row, "Broad Jump"])
+    df[row, "3 Cone"] = as.numeric(stats[row, "3Cone"])
+    df[row, "Shuttle"] = as.numeric(stats[row, "Shuttle"])
+    
+    # Offensive linemen have no stats, so we continue if this is the case.
+    if ((pos == "T") || (pos == "LS") || (pos == "G") || (pos == "C")) {
+      next
+    }
+    
+    # If there are no other stats and this is not an offensive lineman, we want
+    # to ignore this player also.
+    if (length(stat_url) == 0) {
+      bad_rows <- c(bad_rows, row)
+      next
+    }
+    # special case of broken links
+    if (stat_url == "https://www.sports-reference.com/cfb/players/walter-thurmond-1.html") {
+      stat_url = "https://www.sports-reference.com/cfb/players/walter-thurmond-iii-1.html"
+    }
+    if (stat_url == "https://www.sports-reference.com/cfb/players/jj-watt-2.html") {
+      stat_url = "https://www.sports-reference.com/cfb/players/jj-watt-1.html"
+    }
+    if (stat_url == "https://www.sports-reference.com/cfb/players/donta-hightower-2.html") {
+      stat_url = "https://www.sports-reference.com/cfb/players/donta-hightower-1.html"
+    }
+    if (stat_url == "https://www.sports-reference.com/cfb/players/jr-sweezy-2.html") {
+      stat_url = "https://www.sports-reference.com/cfb/players/jr-sweezy-1.html"
+    }
+    if (stat_url == "https://www.sports-reference.com/cfb/players/louis-nix-iii.html") {
+      stat_url = "https://www.sports-reference.com/cfb/players/louis-nix-iii-1.html"
+    }
+    
+    
+    stat_page <- read_html(stat_url)
     conf <- html_text(html_nodes(stat_page, "tbody .left+ .left"))
     conf <- conf[conf != ""]
     if (length(conf) > 0) {
       df[row, "Conference"] = conf[length(conf)]
-    }
-    
-    if ((pos == "T") || (pos == "LS") || (pos == "G") || (pos == "C")) {
-      next
-    }
-  
-    # Get combine statistics
-    phys_html <- html_nodes(stat_page, "#meta span")
-    combine <- get_stat(nfl_page, "combine")
-    if (length(combine) > 0) {
-      df[row, "Height"] = as.numeric(combine[1, "Ht"])
-      df[row, "Weight"] = as.numeric(combine[1, "Wt"])
-      df[row, "40 Yard"] = as.numeric(combine[1, "40yd"])
-      df[row, "Bench"] = as.numeric(combine[1, "Bench"])
-      df[row, "Broad Jump"] = as.numeric(combine[1, "Broad Jump"])
-      df[row, "Shuttle"] = as.numeric(combine[1, "Shuttle"])
-      df[row, "3 Cone"] = as.numeric(combine[1, "3Cone"])
-      df[row, "Vertical"] = as.numeric(combine[1, "Vertical"])
-    } else {
-      if (length(html_nodes(nfl_page, "#meta p+ p span:nth-child(1)")) > 0) {
-        height <- html_text(html_nodes(nfl_page, "#meta p+ p span:nth-child(1)"))
-        weight <- html_text(html_nodes(nfl_page, "#meta span+ span:nth-child(2)"))
-        if ((length(height) == 0) || (length(weight) == 0)) {
-          bad_rows <- c(bad_rows, row)
-          next
-        }
-        height <- as.numeric(strsplit(height, "-")[[1]])
-        df[row, "Height"] = 12 * height[1] + height[2]
-        df[row, "Weight"] = as.numeric(substr(weight, 1, 3))
-      } else {
-        bad_rows <- c(bad_rows, row)
-      }
     }
     
     # Get all other stats
@@ -191,6 +183,7 @@ for (year in 2008:2017) {
     def_table = NULL
     games = {}
     RB = TRUE
+    # Get table of statistics
     if (pos == "QB") {
       pass_table <- header(get_stat(stat_page, "passing"))
     }
@@ -285,11 +278,19 @@ for (year in 2008:2017) {
       }
     }
   }
+  # Set NA values/stats to zero
   df[is.na(df)] = 0
+  # clean bad rows
   df <- df[!(rownames(df) %in% bad_rows), ]
   new_names <- c("Year", names(df))
   other <- data.frame(matrix(year, nrow = nrow(df), ncol=1))
   df <- cbind(other, df)
   names(df) <- new_names
-  #write.csv(df, paste("data/", year, ".csv", sep=""), row.names=FALSE)
+  write.csv(df, paste(c("data/", year, ".csv"), collapse=""), row.names=FALSE)
+  
+  years[[year - START_YEAR + 1]] = df
 }
+full <- do.call(rbind, years)
+full_imputed <- impute(full)
+full_fixed <- fix_conferences(full_imputed)
+write.csv(full_fixed, "data/full.csv", row.names=FALSE)
